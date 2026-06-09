@@ -1,0 +1,39 @@
+name: Build C3Engine WASM
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Emscripten
+      uses: mymindstorm/setup-emsdk@v14
+      with:
+        version: '3.1.50'
+
+    - name: Make dist folder
+      run: mkdir -p dist
+
+    - name: Build WASM
+      run: |
+        emcc src/main.cpp src/bitboards.cpp src/board.cpp \
+             src/movegen.cpp src/eval.cpp src/search.cpp src/tt.cpp \
+          -O3 -std=c++17 -flto \
+          -s WASM=1 \
+          -s EXPORTED_FUNCTIONS='["_engine_init","_engine_go","_engine_stop","_engine_setoption"]' \
+          -s EXPORTED_RUNTIME_METHODS='["ccall","cwrap","UTF8ToString"]' \
+          -s MODULARIZE=1 \
+          -s EXPORT_NAME='C3Engine' \
+          -s ALLOW_MEMORY_GROWTH=1 \
+          -o dist/c3engine.js
+
+    - name: Upload result
+      uses: actions/upload-artifact@v4
+      with:
+        name: c3engine-wasm
+        path: dist/
