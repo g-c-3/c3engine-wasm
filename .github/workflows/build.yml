@@ -1,0 +1,104 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# C3Engine — WASM build pipeline
+#
+# Triggers:
+#   • Every push to main / pull request into main → build + upload artifact
+#   • Every tag matching v* (e.g. v1.0.0) → build + create GitHub Release
+#
+# Outputs:
+#   • c3engine.js   — Emscripten glue script (loaded by the Web Worker wrapper)
+#   • c3engine.wasm — WebAssembly binary (fetched by the .js glue at runtime)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+name: Build C3Engine WASM
+
+on:
+  push:
+    branches: [main]
+    tags:     ['v*']
+  pull_request:
+    branches: [main]
+
+# Only one concurrent build per branch; cancel in-progress runs on new push.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: WASM (Emscripten ${{ vars.EMSDK_VERSION || '3.1.68' }})
+    runs-on: ubuntu-24.04
+
+    env:
+      # Pin the SDK version here. Bump when you need a new Emscripten feature.
+      EMSDK_VERSION: ${{ vars.EMSDK_VERSION || '3.1.68' }}
+      BUILD_DIR: build-wasm
+
+    steps:
+      # ── 1. Source ────────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Emscripten SDK ────────────────────────────────────────────────────
+      - name: Set up Emscripten SDK
+        uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: ${{ env.EMSDK_VERSION }}
+          # Cache the SDK install between runs — saves ~2 min per job
+          actions-cache-folder: .emsdk-cache
+          no-cache: false
+
+      - name: Verify emcc version
+        run: emcc --version
+
+      # ── 3. Configure ─────────────────────────────────────────────────────────
+      - name: CMake configure (Emscripten toolchain)
+        run: |
+          cmake -B $BUILD_DIR \
+            -DCMAKE_TOOLCHAIN_FILE="${EMSDK}/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -G "Unix Makefiles"
+
+      # ── 4. Build ─────────────────────────────────────────────────────────────
+      - name: Build
+        run: cmake --build $BUILD_DIR --parallel $(nproc)
+
+      # ── 5. Sanity check ───────────────────────────────────────────────────────
+      - name: Verify output files exist
+        run: |
+          ls -lh $BUILD_DIR/c3engine.js $BUILD_DIR/c3engine.wasm
+          # Fail if either file is unexpectedly tiny (< 10 KB = something went wrong)
+          MIN_BYTES=10240
+          JS_SIZE=$(stat -c%s "$BUILD_DIR/c3engine.js")
+          WA_SIZE=$(stat -c%s "$BUILD_DIR/c3engine.wasm")
+          echo "c3engine.js  : ${JS_SIZE} bytes"
+          echo "c3engine.wasm: ${WA_SIZE} bytes"
+          [ "$JS_SIZE"  -ge "$MIN_BYTES" ] || { echo "c3engine.js too small!";   exit 1; }
+          [ "$WA_SIZE"  -ge "$MIN_BYTES" ] || { echo "c3engine.wasm too small!"; exit 1; }
+
+      # ── 6. Upload artifact (every successful build) ───────────────────────────
+      - name: Upload WASM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: c3engine-wasm-${{ github.sha }}
+          path: |
+            ${{ env.BUILD_DIR }}/c3engine.js
+            ${{ env.BUILD_DIR }}/c3engine.wasm
+          retention-days: 30
+          if-no-files-found: error
+
+      # ── 7. GitHub Release (tagged commits only) ───────────────────────────────
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          # Attach both files as release assets
+          files: |
+            ${{ env.BUILD_DIR }}/c3engine.js
+            ${{ env.BUILD_DIR }}/c3engine.wasm
+          # Auto-generate release notes from commits since the last tag
+          generate_release_notes: true
+          # Mark pre-release if the tag contains a pre-release suffix (e.g. v1.0.0-beta.1)
+          prerelease: ${{ contains(github.ref_name, '-') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
